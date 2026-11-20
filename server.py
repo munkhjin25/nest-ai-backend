@@ -543,34 +543,57 @@ def chat(request: ChatRequest):
         http_options=types.HttpOptions(timeout=timeout_ms),
     )
 
+    
     response = None
     started = time.monotonic()
+
     try:
-        # One application-level attempt. The SDK may internally retry
-        # transient upstream failures; avoid doubling a long wait here.
-        response = client.models.generate_content(
-            model=model_name,
-            contents=contents,
-            config=types.GenerateContentConfig(
-                system_instruction=system_instruction,
-                temperature=0.3,
-                max_output_tokens=1024,
-            ),
-        )
-        logger.info(
-            "Gemini completed | model=%s | elapsed=%.1fs",
-            model_name,
-            time.monotonic() - started,
-        )
+        for attempt in range(2):
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=contents,
+                    config=types.GenerateContentConfig(
+                        system_instruction=system_instruction,
+                        temperature=0.3,
+                        max_output_tokens=1024,
+                    ),
+                )
+
+                logger.info(
+                    "Gemini completed | model=%s | elapsed=%.1fs",
+                    model_name,
+                    time.monotonic() - started,
+                )
+                break
+
+            except Exception as error:
+                status, detail, retryable = classify_gemini_error(error)
+
+                if not retryable or attempt == 1:
+                    raise
+
+                logger.warning(
+                    "Gemini temporary failure | status=%s | retrying",
+                    status,
+                )
+                time.sleep(1)
+
     except Exception as error:
         status, detail, _ = classify_gemini_error(error)
+
         logger.exception(
             "Gemini failed | model=%s | elapsed=%.1fs | status=%s",
             model_name,
             time.monotonic() - started,
             status,
         )
-        raise HTTPException(status_code=status, detail=detail) from error
+
+        raise HTTPException(
+            status_code=status,
+            detail=detail,
+        ) from error
+
     finally:
         client.close()
 
