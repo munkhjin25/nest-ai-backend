@@ -522,7 +522,7 @@ def chat(request: ChatRequest):
 
     model_name = os.getenv(
         "GEMINI_MODEL",
-        "gemini-3.7-flash",
+        "gemini-3.8-flash",
     )
 
     logger.info(
@@ -534,62 +534,45 @@ def chat(request: ChatRequest):
         image_bytes is not None,
     )
 
+    # Keep requests short enough for browser users and Render's proxy.
+    # Override with GEMINI_TIMEOUT_MS if needed (milliseconds).
+    timeout_ms = max(10000, min(90000, int(os.getenv("GEMINI_TIMEOUT_MS", "45000"))))
+
     client = genai.Client(
         api_key=api_key,
-        http_options=types.HttpOptions(
-            timeout=30000,
-        ),
+        http_options=types.HttpOptions(timeout=timeout_ms),
     )
 
     response = None
-
-    # Retry once for temporary errors
-    for attempt in range(2):
-
-        try:
-            started = time.monotonic()
-
-            response = client.models.generate_content(
-                model=model_name,
-                contents=contents,
-                config=types.GenerateContentConfig(
-                    system_instruction=system_instruction,
-                    temperature=0.3,
-                    max_output_tokens=2048,
-                ),
-            )
-
-            elapsed = time.monotonic() - started
-
-            logger.info(
-                "Gemini completed in %.1f seconds",
-                elapsed,
-            )
-
-            break
-
-        except Exception as error:
-
-            status, detail, retryable = (
-                classify_gemini_error(error)
-            )
-
-            logger.exception(
-                "Gemini attempt %d failed "
-                "| model=%s | status=%s",
-                attempt + 1,
-                model_name,
-                status,
-            )
-
-            if not retryable or attempt == 1:
-
-                raise HTTPException(
-                    status_code=status,
-                    detail=detail,
-                ) from error
-
-            time.sleep(2)
+    started = time.monotonic()
+    try:
+        # One application-level attempt. The SDK may internally retry
+        # transient upstream failures; avoid doubling a long wait here.
+        response = client.models.generate_content(
+            model=model_name,
+            contents=contents,
+            config=types.GenerateContentConfig(
+                system_instruction=system_instruction,
+                temperature=0.3,
+                max_output_tokens=1024,
+            ),
+        )
+        logger.info(
+            "Gemini completed | model=%s | elapsed=%.1fs",
+            model_name,
+            time.monotonic() - started,
+        )
+    except Exception as error:
+        status, detail, _ = classify_gemini_error(error)
+        logger.exception(
+            "Gemini failed | model=%s | elapsed=%.1fs | status=%s",
+            model_name,
+            time.monotonic() - started,
+            status,
+        )
+        raise HTTPException(status_code=status, detail=detail) from error
+    finally:
+        client.close()
 
     if response is None:
         raise HTTPException(
